@@ -1,0 +1,96 @@
+name: Release Windows
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install WebView2 (Tauri)
+        shell: pwsh
+        run: |
+          # WebView2 Runtime is usually present on windows-latest; ensure bootstrapper exists
+          Write-Host "WebView2 assumed available on runner"
+
+      - name: Seed OpenCode auth (from GitHub secret)
+        shell: bash
+        env:
+          OPENCODE_AUTH_JSON: ${{ secrets.OPENCODE_AUTH_JSON }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p packaging/seed agent-runtime/vendor/seed
+          if [[ -n "${OPENCODE_AUTH_JSON:-}" ]]; then
+            printf '%s\n' "$OPENCODE_AUTH_JSON" > packaging/seed/opencode-auth.json
+          elif [[ -n "${OPENCODE_API_KEY:-}" ]]; then
+            python - <<'PY'
+          import json, os
+          key = os.environ["OPENCODE_API_KEY"]
+          doc = {
+            "opencode": {"type": "api_key", "key": key},
+            "opencode-go": {"type": "api_key", "key": key},
+          }
+          open("packaging/seed/opencode-auth.json", "w").write(json.dumps(doc, indent=2) + "\n")
+          PY
+          else
+            echo "Missing secret OPENCODE_AUTH_JSON or OPENCODE_API_KEY" >&2
+            exit 1
+          fi
+          cp packaging/seed/opencode-auth.json agent-runtime/vendor/seed/auth.json
+          cat > agent-runtime/vendor/seed/settings.json <<'JSON'
+          {
+            "defaultProvider": "opencode",
+            "defaultModel": "muse-spark"
+          }
+          JSON
+          cp agent-runtime/vendor/seed/settings.json packaging/seed/settings.json
+          echo "OpenCode seed written (not committed)"
+
+      - name: Vendor Node + Pi (Windows)
+        shell: bash
+        run: bash scripts/vendor-runtime.sh
+
+      - name: Install JS deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Windows NSIS installer
+        shell: bash
+        run: pnpm tauri build --bundles nsis
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-agent-windows-nsis
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/*.exe
+
+      - name: Attach to GitHub Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            src-tauri/target/release/bundle/nsis/*.exe
