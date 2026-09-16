@@ -40,7 +40,7 @@ fn spawn_args_env_and_pi_bin_override() {
     assert!(args.iter().any(|a| a.contains("recap.md")));
     assert!(!args.iter().any(|a| *a == "--approve"));
 
-    let missing = resolve_pi_bin(None, Some("/no/such/bin"));
+    let missing = resolve_pi_bin(None, Some("/no/such/bin"), &[]);
     assert_eq!(missing.unwrap_err(), PI_INSTALL_HINT);
 
     let tmp = tempfile::tempdir().unwrap();
@@ -68,6 +68,11 @@ fn spawn_args_env_and_pi_bin_override() {
     assert!(plan.env.contains_key("DESKPI_WORKSPACE_FILE"));
     assert!(!plan.env.contains_key("IGNORED"));
     assert!(!plan.args.contains(&"--approve".into()));
+    assert_eq!(
+        plan.env.get(deskpi_lib::config::PI_AGENT_DIR_ENV).unwrap(),
+        &paths.pi_agent_dir.display().to_string()
+    );
+    assert_eq!(plan.env.get("HOME").unwrap(), "/home/me");
 
     let env = build_spawn_env(
         &host,
@@ -76,6 +81,20 @@ fn spawn_args_env_and_pi_bin_override() {
         "ask",
     );
     assert_eq!(env.get("HOME").unwrap(), "/home/me");
+}
+
+#[test]
+fn resolve_pi_bin_prefers_bundled_then_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let runtime = tmp.path().join("agent-runtime");
+    let bundled = runtime.join("vendor/pi/bin/pi");
+    fs::create_dir_all(bundled.parent().unwrap()).unwrap();
+    fs::write(&bundled, b"#!/bin/sh\n").unwrap();
+    let path_dir = tmp.path().join("bin");
+    fs::create_dir_all(&path_dir).unwrap();
+    fs::write(path_dir.join("pi"), b"#!/bin/sh\n").unwrap();
+    let found = resolve_pi_bin(None, Some(path_dir.to_str().unwrap()), &[runtime]).unwrap();
+    assert_eq!(found, bundled);
 }
 
 #[test]
