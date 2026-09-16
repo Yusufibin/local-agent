@@ -284,8 +284,9 @@ pub async fn pick_workspace(app: AppHandle, state: State<'_, AppState>) -> HostR
 pub fn save_secret(state: State<AppState>, provider: String, key: String) -> HostResult<Value> {
     let mut sc = lock_sidecar(&state)?;
     let mut secrets = load_secrets(&sc.paths.secrets_file)?;
-    secrets.insert(provider_to_env_key(&provider), key);
+    secrets.insert(provider_to_env_key(&provider), key.clone());
     save_secrets(&sc.paths.secrets_file, &secrets)?;
+    let _ = crate::config::upsert_pi_auth_key(&sc.paths.pi_agent_dir, &provider, &key);
     if sc.settings.active_root.is_some() {
         let st = sc.restart()?;
         return Ok(st);
