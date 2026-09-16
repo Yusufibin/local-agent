@@ -48,6 +48,7 @@ pub struct Sidecar {
 impl Sidecar {
     pub fn new(paths: AppPaths, sink: EventSink) -> HostResult<Self> {
         paths.ensure_dirs()?;
+        let _ = crate::config::seed_pi_home(&paths, &current_host_env());
         let settings = load_settings(&paths.settings_file, &paths.agent_runtime)?;
         if settings.active_root.is_some() && !paths.settings_file.exists() {
             let _ = crate::config::save_settings(&paths.settings_file, &settings);
@@ -139,6 +140,7 @@ impl Sidecar {
         write_workspace_file(&self.paths, &self.settings)?;
         let secrets = load_secrets(&self.paths.secrets_file)?;
         let host_env = current_host_env();
+        let _ = crate::config::seed_pi_home(&self.paths, &host_env);
         let plan = match build_spawn_plan(
             &self.paths,
             &self.settings,
