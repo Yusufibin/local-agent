@@ -29,12 +29,6 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install WebView2 (Tauri)
-        shell: pwsh
-        run: |
-          # WebView2 Runtime is usually present on windows-latest; ensure bootstrapper exists
-          Write-Host "WebView2 assumed available on runner"
-
       - name: Seed OpenCode auth (from GitHub secret)
         shell: bash
         env:
@@ -69,12 +63,18 @@ jobs:
           cp agent-runtime/vendor/seed/settings.json packaging/seed/settings.json
           echo "OpenCode seed written (not committed)"
 
+      - name: Install JS deps
+        shell: bash
+        run: |
+          if [[ -f pnpm-lock.yaml ]]; then
+            pnpm install --frozen-lockfile
+          else
+            pnpm install
+          fi
+
       - name: Vendor Node + Pi (Windows)
         shell: bash
         run: bash scripts/vendor-runtime.sh
-
-      - name: Install JS deps
-        run: pnpm install --frozen-lockfile
 
       - name: Build Windows NSIS installer
         shell: bash
