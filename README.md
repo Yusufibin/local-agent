@@ -13,13 +13,18 @@ Desktop host for [Pi coding agent](https://pi.dev) (`pi --mode rpc`). The GUI is
 | Node | 22.x LTS |
 | `@earendil-works/pi-coding-agent` | **0.85.1** (tested 2026-09-16) |
 
-## Install Pi
+## Node + Pi (bundled)
+
+Linux amd64 AppImage ships a portable **Node 22 LTS** and `@earendil-works/pi-coding-agent` **0.85.1** under `agent-runtime/vendor/`. No `pi` / Node on the user PATH is required.
+
+Resolution: `PI_BIN` → `agent-runtime/vendor/pi/bin/pi` (exec with vendored `node`) → `PATH` (dev fallback).
 
 ```bash
-npm i -g --ignore-scripts @earendil-works/pi-coding-agent
+bash scripts/vendor-runtime.sh   # fills agent-runtime/vendor/ (gitignored)
+pnpm tauri dev                   # PATH fallback if vendor/ is absent
 ```
 
-`--ignore-scripts` is the official Pi install advice. The desktop binary does **not** bundle Node; `pi` must be on `PATH` (or set `PI_BIN`).
+`--ignore-scripts` is the official Pi install advice if you use a global `pi` for development.
 
 ## Develop
 
@@ -69,7 +74,7 @@ Verified 2026-09-16 against shipped `agent-runtime` extensions (workspace-roots 
 
 Security is enforced in Pi extensions (`workspace-roots`, `permission-gate`, `protected-paths`) plus the GUI approval bridge — not a parallel Rust permission engine. Product extensions load only via `-e`. Do not pass `--approve` unless `expertApprove` is set in `{app_data}/settings.json`.
 
-API keys live in `{app_data}/secrets.json` (chmod 600), never in `settings.json`, never in the webview. Pi may also read `~/.pi/agent/auth.json` because `HOME` is passed through.
+API keys live in `{app_data}/secrets.json` (chmod 600), never in `settings.json`, never in the webview. Pi auth is isolated with official `PI_CODING_AGENT_DIR={app_data}/pi-home/.pi/agent` (HOME is not rewritten, so bash `~` stays the real user home). First launch copies gitignored `packaging/seed/opencode-auth.json` (or `vendor/seed/auth.json` baked at package time from the build machine) if that file does not exist yet. Settings UI remains the way to update the key. **Never commit API keys.**
 
 ## Golden path (Phase 5)
 
@@ -106,11 +111,13 @@ Crash / silence: banner in the main column, button **Restart sidecar** (`agent_r
 
 ## Packaging (Phase 8)
 
-Linux AppImage / .deb (GUI only). Node + `pi` stay a runtime dependency.
+Linux AppImage / .deb. Node 22 + Pi 0.85.1 are vendored into the bundle (`agent-runtime/vendor/`).
 
 ```bash
 pnpm package:appimage
 # → src-tauri/target/release/bundle/appimage/Local Agent_0.1.0_amd64.AppImage
 ```
 
-Produced on 2026-09-16: **77 MiB** AppImage. `agent-runtime` is inside at `usr/lib/Local Agent/agent-runtime` (extensions, skills, `/recap` template). If resolution fails at launch, set `DESKPI_RUNTIME`. A self-contained Node sidecar is not shipped in this pass.
+`scripts/package-appimage.sh` runs `vendor-runtime.sh` first (Node tarball + `npm i --ignore-scripts @earendil-works/pi-coding-agent@0.85.1`), copies a local OpenCode seed from `/root/.pi/agent/auth.json` when present into gitignored `packaging/seed/` and `agent-runtime/vendor/seed/`, then `tauri build --bundles appimage`. Smoke: vendored `node` + `pi --version` / RPC `get_state` with `PATH=/usr/bin:/bin` (no global `pi`).
+
+Produced on 2026-09-16: **134 MiB** AppImage. `agent-runtime` lands at `usr/lib/Local Agent/agent-runtime` (extensions, skills, `/recap`, `vendor/node`, `vendor/pi`). If resolution fails at launch, set `DESKPI_RUNTIME`.
