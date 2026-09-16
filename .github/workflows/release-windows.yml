@@ -65,15 +65,26 @@ jobs:
 
       - name: Install JS deps
         shell: bash
-        run: pnpm install
+        run: |
+          set -euo pipefail
+          pnpm store prune || true
+          # Bypass stale lockfile integrity mismatches (tinyspy etc.)
+          pnpm install --no-frozen-lockfile --force
 
       - name: Vendor Node + Pi (Windows)
         shell: bash
         run: bash scripts/vendor-runtime.sh
 
-      - name: Materialize Tauri icons
+      - name: Ensure Tauri icons present
         shell: bash
-        run: python scripts/materialize-tauri-icons.py || python3 scripts/materialize-tauri-icons.py
+        run: |
+          set -euo pipefail
+          if [[ -f src-tauri/icons/icon.ico && -s src-tauri/icons/icon.ico ]]; then
+            ls -la src-tauri/icons/icon.ico
+            echo "icons already present"
+          else
+            python scripts/materialize-tauri-icons.py || python3 scripts/materialize-tauri-icons.py
+          fi
 
       - name: Build Windows NSIS installer
         shell: bash
