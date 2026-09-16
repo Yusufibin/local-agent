@@ -1,0 +1,6 @@
+{"type":"agent_start"}
+{"type":"tool_execution_start","toolCallId":"call_1","toolName":"ls","args":{"path":"."}}
+{"type":"tool_execution_update","toolCallId":"call_1","toolName":"ls","args":{"path":"."},"partialResult":{"content":[{"type":"text","text":"file.txt\n"}]}}
+{"type":"tool_execution_end","toolCallId":"call_1","toolName":"ls","result":{"content":[{"type":"text","text":"file.txt\n"}],"details":{}},"isError":false}
+{"type":"agent_end","messages":[],"willRetry":false}
+{"type":"agent_settled"}
