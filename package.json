@@ -14,7 +14,8 @@
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml -- --nocapture",
     "golden": "node scripts/golden-path-recap.mjs",
     "golden:offline": "node scripts/golden-path-offline.mjs",
-    "package:appimage": "bash scripts/package-appimage.sh"
+    "package:appimage": "bash scripts/package-appimage.sh",
+    "vendor:runtime": "bash scripts/vendor-runtime.sh"
   },
   "license": "MIT",
   "dependencies": {

@@ -14,3 +14,15 @@ secrets.json
 deskpi-scaffold
 tests/golden-path-output.md
 *.AppImage
+
+# Vendored Node/Pi (scripts/vendor-runtime.sh). Do not commit binaries.
+agent-runtime/vendor/node/
+agent-runtime/vendor/pi/
+agent-runtime/vendor/seed/
+packaging/cache/
+
+# Real OpenCode keys — example files are the only seed paths allowed in git.
+packaging/seed/*
+!packaging/seed/opencode-auth.example.json
+!packaging/seed/settings.example.json
+!packaging/seed/.gitignore
