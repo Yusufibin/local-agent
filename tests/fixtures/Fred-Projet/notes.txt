@@ -1,0 +1,4 @@
+Idées:
+- garder l’outil simple
+- supporter un fichier todo.md
+- plus tard: export JSON

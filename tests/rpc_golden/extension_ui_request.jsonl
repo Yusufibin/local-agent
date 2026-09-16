@@ -1,0 +1,2 @@
+{"type":"extension_ui_request","id":"uuid-select","method":"select","title":"Allow dangerous command?","options":["Allow","Block"]}
+{"type":"extension_ui_request","id":"uuid-confirm","method":"confirm","title":"Write file?","message":"ok.md"}
