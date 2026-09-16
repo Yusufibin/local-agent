@@ -1,0 +1,31 @@
+[[permission]]
+identifier = "allow-agent-ipc"
+description = "IPC commands for the Pi sidecar multiplexer"
+commands.allow = [
+  "agent_start",
+  "agent_stop",
+  "agent_restart",
+  "prompt",
+  "steer",
+  "follow_up",
+  "abort",
+  "new_session",
+  "switch_session",
+  "list_sessions",
+  "get_state",
+  "get_messages",
+  "set_model",
+  "set_thinking_level",
+  "get_available_models",
+  "get_session_stats",
+  "compact",
+  "get_commands",
+  "ui_respond",
+  "pick_workspace",
+  "save_secret",
+  "get_settings",
+  "set_permission_mode",
+  "add_root",
+  "mark_running",
+  "install_hint",
+]
