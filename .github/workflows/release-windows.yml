@@ -65,12 +65,7 @@ jobs:
 
       - name: Install JS deps
         shell: bash
-        run: |
-          if [[ -f pnpm-lock.yaml ]]; then
-            pnpm install --frozen-lockfile
-          else
-            pnpm install
-          fi
+        run: pnpm install --frozen-lockfile
 
       - name: Vendor Node + Pi (Windows)
         shell: bash
