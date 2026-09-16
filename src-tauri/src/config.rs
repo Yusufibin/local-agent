@@ -143,8 +143,8 @@ fn push_lib_runtime_candidates(out: &mut Vec<PathBuf>, lib_dir: &Path) {
 /// Resolve `agent-runtime` at process start. Never bakes a compile-time
 /// workspace checkout path into the binary.
 ///
-/// Order: `DESKPI_RUNTIME` (strict)  Tauri resource dir  next to the
-/// executable / `APPDIR`  walk-up from exe and cwd.
+/// Order: `DESKPI_RUNTIME` (strict) → Tauri resource dir → next to the
+/// executable / `APPDIR` → walk-up from exe and cwd.
 pub fn resolve_agent_runtime(
     resource_dir: Option<&Path>,
     host_env: &BTreeMap<String, String>,
