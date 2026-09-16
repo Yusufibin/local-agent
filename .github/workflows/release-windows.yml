@@ -71,6 +71,10 @@ jobs:
         shell: bash
         run: bash scripts/vendor-runtime.sh
 
+      - name: Materialize Tauri icons
+        shell: bash
+        run: python scripts/materialize-tauri-icons.py || python3 scripts/materialize-tauri-icons.py
+
       - name: Build Windows NSIS installer
         shell: bash
         run: pnpm tauri build --bundles nsis

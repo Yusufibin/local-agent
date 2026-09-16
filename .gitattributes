@@ -1,0 +1,5 @@
+src-tauri/icons/*.png binary
+src-tauri/icons/*.ico binary
+src-tauri/icons/*.icns binary
+scripts/tauri-icons.tar.b64 text eol=lf
+scripts/tauri-icons.b64/*.txt text eol=lf

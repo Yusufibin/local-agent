@@ -1,0 +1,34 @@
+name: Commit Tauri icons
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  commit-icons:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Materialize binary icons
+        run: python3 scripts/materialize-tauri-icons.py
+
+      - name: Commit and push src-tauri/icons
+        run: |
+          set -euo pipefail
+          test -s src-tauri/icons/icon.ico
+          file src-tauri/icons/icon.ico src-tauri/icons/32x32.png src-tauri/icons/icon.icns
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src-tauri/icons
+          if git diff --cached --quiet; then
+            echo "icons already up to date"
+            git rev-parse HEAD
+            exit 0
+          fi
+          git commit -m "Add binary Tauri icons required by Windows NSIS"
+          git push origin HEAD:main
+          echo "Pushed $(git rev-parse HEAD)"
