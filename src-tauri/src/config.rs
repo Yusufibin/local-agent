@@ -6,7 +6,18 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const PI_INSTALL_HINT: &str = "npm i -g --ignore-scripts @earendil-works/pi-coding-agent";
+pub const PI_INSTALL_HINT: &str =
+    "bundled pi not found; set PI_BIN or install: npm i -g --ignore-scripts @earendil-works/pi-coding-agent";
+
+/// Official Pi env (`ENV_AGENT_DIR` in `@earendil-works/pi-coding-agent`).
+/// We set this to `{app_data}/pi-home/.pi/agent` so auth/settings live in
+/// app data. HOME is **not** rewritten — bash `~` stays the real user home.
+pub const PI_AGENT_DIR_ENV: &str = "PI_CODING_AGENT_DIR";
+
+pub const VENDOR_NODE_REL: &str = "vendor/node/bin/node";
+pub const VENDOR_PI_REL: &str = "vendor/pi/bin/pi";
+pub const VENDOR_PI_CLI_REL: &str =
+    "vendor/pi/lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js";
 
 pub const DEFAULT_DENY_READ_GLOBS: &[&str] = &[
     "**/.env",
@@ -32,6 +43,7 @@ const SECRET_ENV_KEYS: &[&str] = &[
     "COHERE_API_KEY",
     "MOONSHOT_API_KEY",
     "ZAI_API_KEY",
+    "OPENCODE_API_KEY",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,12 +97,17 @@ pub struct AppPaths {
     pub stderr_log: PathBuf,
     pub host_log: PathBuf,
     pub agent_runtime: PathBuf,
+    /// Isolated Pi home (`{app_data}/pi-home`). Auth is `{pi_home}/.pi/agent`.
+    pub pi_home: PathBuf,
+    pub pi_agent_dir: PathBuf,
 }
 
 impl AppPaths {
     pub fn from_app_data(app_data: PathBuf, agent_runtime: PathBuf) -> Self {
         let runtime_dir = app_data.join("runtime");
         let logs_dir = app_data.join("logs");
+        let pi_home = app_data.join("pi-home");
+        let pi_agent_dir = pi_home.join(".pi/agent");
         Self {
             settings_file: app_data.join("settings.json"),
             secrets_file: app_data.join("secrets.json"),
@@ -101,6 +118,8 @@ impl AppPaths {
             runtime_dir,
             logs_dir,
             agent_runtime,
+            pi_home,
+            pi_agent_dir,
             app_data,
         }
     }
@@ -109,6 +128,7 @@ impl AppPaths {
         fs::create_dir_all(&self.runtime_dir)?;
         fs::create_dir_all(&self.sessions_dir)?;
         fs::create_dir_all(&self.logs_dir)?;
+        fs::create_dir_all(&self.pi_agent_dir)?;
         Ok(())
     }
 }
@@ -288,36 +308,7 @@ pub struct SpawnPlan {
     pub stderr_log: PathBuf,
 }
 
-pub fn resolve_pi_bin(
-    pi_bin: Option<&str>,
-    path_env: Option<&str>,
-) -> Result<PathBuf, String> {
-    if let Some(explicit) = pi_bin.map(str::trim).filter(|s| !s.is_empty()) {
-        let p = PathBuf::from(explicit);
-        if p.exists() {
-            return Ok(p);
-        }
-        if let Some(found) = which_in_path(explicit, path_env) {
-            return Ok(found);
-        }
-        return Ok(p);
-    }
-    which_in_path("pi", path_env).ok_or_else(|| PI_INSTALL_HINT.to_string())
-}
-
-pub fn which_in_path(name: &str, path_env: Option<&str>) -> Option<PathBuf> {
-    let path = path_env?;
-    for dir in path.split(':') {
-        if dir.is_empty() {
-            continue;
-        }
-        let candidate = Path::new(dir).join(name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
-}
+include!("config_bundle.rs");
 
 pub fn build_pi_args(session_dir: &Path, runtime: &Path, expert_approve: bool) -> Vec<String> {
     let ext = runtime.join("extensions");
@@ -486,23 +477,47 @@ pub fn build_spawn_plan(
     host_env: &BTreeMap<String, String>,
     pi_bin_override: Option<&str>,
 ) -> Result<SpawnPlan, String> {
-    let program = resolve_pi_bin(
+    let _ = seed_pi_home(paths, host_env);
+    let roots = vendor_roots(&paths.agent_runtime);
+    let launch = resolve_pi_launch(
         pi_bin_override.or_else(|| host_env.get("PI_BIN").map(String::as_str)),
         host_env.get("PATH").map(String::as_str),
+        &roots,
     )?;
     let cwd = settings
         .active_root
         .clone()
         .ok_or_else(|| "no active workspace root".to_string())?;
-    let args = build_pi_args(&paths.sessions_dir, &paths.agent_runtime, settings.expert_approve);
-    let env = build_spawn_env(
+    let mut args = launch.leading_args;
+    args.extend(build_pi_args(
+        &paths.sessions_dir,
+        &paths.agent_runtime,
+        settings.expert_approve,
+    ));
+    let mut env = build_spawn_env(
         host_env,
         secrets,
         &paths.workspace_file,
         &settings.permission_mode,
     );
+    let mut path = env.get("PATH").cloned().unwrap_or_default();
+    if let Some(pi) = vendored_pi(&roots) {
+        if let Some(dir) = pi.parent() {
+            prepend_path_dir(&mut path, dir);
+        }
+    }
+    if let Some(node) = vendored_node(&roots) {
+        if let Some(dir) = node.parent() {
+            prepend_path_dir(&mut path, dir);
+        }
+    }
+    env.insert("PATH".into(), path);
+    env.insert(
+        PI_AGENT_DIR_ENV.into(),
+        paths.pi_agent_dir.display().to_string(),
+    );
     Ok(SpawnPlan {
-        program,
+        program: launch.program,
         args,
         cwd,
         env,
