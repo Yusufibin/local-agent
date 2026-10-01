@@ -80,3 +80,22 @@ jobs:
         if: steps.format.outcome == 'failure'
         shell: bash
         run: exit 1
+
+  lock-metadata:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Read package metadata
+        shell: bash
+        run: |
+          node --input-type=module - <<'JS'
+          for (const [name, version] of [["tinyspy","4.0.6"],["@vitest/spy","3.2.7"],["@vitest/snapshot","3.2.7"],["postcss","8.5.28"]]) {
+            const response = await fetch("https://registry.npmjs.org/" + encodeURIComponent(name) + "/" + version);
+            if (!response.ok) throw new Error("Registry request failed");
+            const metadata = await response.json();
+            console.log("REGISTRY_METADATA " + JSON.stringify({name,version,integrity:metadata.dist.integrity}));
+          }
+          JS

@@ -52,6 +52,7 @@ export type SessionState = {
   sessionCost: number | null;
   pendingUi: ExtensionUiRequest[];
   generation: number;
+  messageSequence: number;
 };
 
 export const PI_INSTALL_HINT = "npm i -g --ignore-scripts @earendil-works/pi-coding-agent";
@@ -101,6 +102,7 @@ export function initialState(): SessionState {
     sessionCost: null,
     pendingUi: [],
     generation: 0,
+    messageSequence: 0,
   };
 }
 
@@ -224,7 +226,7 @@ function applyRpc(state: SessionState, event: PiEvent): SessionState {
       return { ...state, runState: "idle", currentMessageId: null, partialByIndex: {} };
     case "message_start": {
       const message = (event.message as Record<string, unknown>) ?? {};
-      const id = String(message.id ?? `m-${state.messages.length}`);
+      const id = String(message.id ?? `m-${state.messageSequence}`);
       const msg: TranscriptMessage = {
         id,
         role: String(message.role ?? "assistant"),
@@ -233,6 +235,7 @@ function applyRpc(state: SessionState, event: PiEvent): SessionState {
       return {
         ...state,
         currentMessageId: id,
+        messageSequence: state.messageSequence + 1,
         partialByIndex: {},
         messages: [...state.messages, msg],
       };
@@ -525,6 +528,11 @@ function bounded(text: string, limit: number): string {
   return text.length > limit ? text.slice(0, limit) + "\n… (truncated)" : text;
 }
 
+function boundedValue(value: unknown): unknown {
+  const text = JSON.stringify(value);
+  return text && text.length > MAX_TOOL_BODY ? { preview: bounded(text, MAX_TOOL_BODY), truncated: true } : value;
+}
+
 /** Bound retained state as well as rendered output, including restored sessions. */
 export function reduce(state: SessionState, action: Action): SessionState {
   const next = reduceAction(state, action);
@@ -534,21 +542,21 @@ export function reduce(state: SessionState, action: Action): SessionState {
     content: message.content.map((block) => {
       if (block.type === "text") return { ...block, text: bounded(block.text, 128_000) };
       if (block.type === "thinking") return { ...block, thinking: bounded(block.thinking, MAX_TOOL_BODY) };
-      return { ...block, argumentsText: bounded(block.argumentsText, MAX_TOOL_BODY) };
+      return { ...block, arguments: boundedValue(block.arguments), argumentsText: bounded(block.argumentsText, MAX_TOOL_BODY) };
     }),
   }));
   const owners = new Set(messages.map((message) => message.id));
   const toolCards = next.toolCards === state.toolCards && messages === state.messages ? state.toolCards : Object.fromEntries(Object.entries(next.toolCards)
     .filter(([, card]) => !card.messageId || owners.has(card.messageId))
     .slice(-TRANSCRIPT_WINDOW)
-    .map(([id, card]) => [id, { ...card, body: bounded(card.body, MAX_TOOL_BODY),
+    .map(([id, card]) => [id, { ...card, args: boundedValue(card.args), body: bounded(card.body, MAX_TOOL_BODY),
       diff: card.diff ? bounded(card.diff, MAX_TOOL_BODY) : undefined,
       patch: card.patch ? bounded(card.patch, MAX_TOOL_BODY) : undefined,
     }]));
   const partialByIndex = Object.fromEntries(Object.entries(next.partialByIndex).map(([index, block]) => {
     if (block.type === "text") return [index, { ...block, text: bounded(block.text, 128_000) }];
     if (block.type === "thinking") return [index, { ...block, thinking: bounded(block.thinking, MAX_TOOL_BODY) }];
-    return [index, { ...block, argumentsText: bounded(block.argumentsText, MAX_TOOL_BODY) }];
+    return [index, { ...block, arguments: boundedValue(block.arguments), argumentsText: bounded(block.argumentsText, MAX_TOOL_BODY) }];
   }));
   return { ...next, messages, toolCards, partialByIndex, toasts: next.toasts.slice(-5) };
 }

@@ -37,6 +37,11 @@ describe("session reliability", () => {
     state = reduce(state, { type: "host", event: rpc({ type: "tool_execution_end", toolCallId: "large", result: { content: "x".repeat(2 * MAX_TOOL_BODY) } }) });
     expect(state.toolCards.large.body.length).toBeLessThan(MAX_TOOL_BODY + 50);
   });
+  it("uses unique fallback IDs beyond the retained message window", () => {
+    let state = initialState();
+    for (let i = 0; i < 450; i++) state = reduce(state, { type: "host", event: rpc({ type: "message_start", message: { role: "user", content: "hi" } }) });
+    expect(new Set(state.messages.map((message) => message.id)).size).toBe(TRANSCRIPT_WINDOW);
+  });
   it("shows generic host errors", () => {
     const state = reduce(initialState(), { type: "host", event: { kind: "log", level: "error", message: "Provider rejected the key" } });
     expect(state.toasts[0].message).toContain("Provider rejected");
