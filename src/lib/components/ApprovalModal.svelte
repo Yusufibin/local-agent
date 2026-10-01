@@ -4,15 +4,17 @@
 
   let {
     request,
+    busy = false,
     onrespond,
   }: {
     request: ExtensionUiRequest;
+    busy?: boolean;
     onrespond: (payload: Record<string, unknown>) => void;
   } = $props();
 
   let inputValue = $state("");
   $effect(() => {
-    if (request.prefill) inputValue = request.prefill;
+    inputValue = request.prefill ?? "";
   });
   let dialogEl: HTMLDivElement | undefined;
 
@@ -25,11 +27,12 @@
           'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
         ),
       ).filter((el) => !el.hasAttribute("disabled"));
+    const previous = document.activeElement as HTMLElement | null;
     focusables()[0]?.focus();
     function trap(e: KeyboardEvent) {
       if (e.key === "Escape") {
         e.preventDefault();
-        onrespond({ cancelled: true });
+        if (!busy) onrespond({ cancelled: true });
         return;
       }
       if (e.key !== "Tab") return;
@@ -46,33 +49,33 @@
       }
     }
     root.addEventListener("keydown", trap);
-    return () => root.removeEventListener("keydown", trap);
+    return () => { root.removeEventListener("keydown", trap); previous?.focus(); };
   });
 </script>
 
 <div class="modal-backdrop" data-testid="approval-modal">
-  <div class="modal" bind:this={dialogEl} role="dialog" aria-modal="true" tabindex="-1">
-    <h2>{request.title ?? request.method}</h2>
+  <div class="modal" bind:this={dialogEl} role="dialog" aria-modal="true" aria-busy={busy} aria-labelledby="approval-title" tabindex="-1">
+    <h2 id="approval-title">{request.title ?? request.method}</h2>
     {#if request.message}
       <pre style="white-space:pre-wrap">{request.message}</pre>
     {/if}
     {#if request.method === "select"}
       <div class="actions">
         {#each request.options ?? [] as opt}
-          <button type="button" class="primary" onclick={() => onrespond({ value: opt })}>{opt}</button>
+          <button disabled={busy} type="button" class="primary" onclick={() => onrespond({ value: opt })}>{opt}</button>
         {/each}
-        <button type="button" onclick={() => onrespond({ cancelled: true })}>Cancel</button>
+        <button disabled={busy} type="button" onclick={() => onrespond({ cancelled: true })}>Cancel</button>
       </div>
     {:else if request.method === "confirm"}
       <div class="actions">
-        <button type="button" onclick={() => onrespond({ confirmed: false })}>Block</button>
-        <button type="button" class="primary" onclick={() => onrespond({ confirmed: true })}>Allow</button>
+        <button disabled={busy} type="button" onclick={() => onrespond({ confirmed: false })}>Block</button>
+        <button disabled={busy} type="button" class="primary" onclick={() => onrespond({ confirmed: true })}>Allow</button>
       </div>
     {:else if request.method === "input" || request.method === "editor"}
-      <textarea rows={request.method === "editor" ? 8 : 2} bind:value={inputValue} placeholder={request.placeholder}></textarea>
+      <textarea disabled={busy} rows={request.method === "editor" ? 8 : 2} bind:value={inputValue} placeholder={request.placeholder}></textarea>
       <div class="actions">
-        <button type="button" onclick={() => onrespond({ cancelled: true })}>Cancel</button>
-        <button type="button" class="primary" onclick={() => onrespond({ value: inputValue })}>OK</button>
+        <button disabled={busy} type="button" onclick={() => onrespond({ cancelled: true })}>Cancel</button>
+        <button disabled={busy} type="button" class="primary" onclick={() => onrespond({ value: inputValue })}>OK</button>
       </div>
     {/if}
   </div>

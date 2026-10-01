@@ -4,11 +4,14 @@ pub mod config;
 pub mod error;
 pub mod events;
 pub mod jsonl;
+pub mod history;
 pub mod logs;
 pub mod rpc;
 pub mod sessions;
 pub mod sidecar;
 pub mod window_guard;
+#[cfg(windows)]
+pub mod windows_job;
 
 use commands::{persist_window_close, AppState};
 use config::{current_host_env, resolve_agent_runtime, AppPaths};

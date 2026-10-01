@@ -1,11 +1,13 @@
 <script lang="ts">
   let {
+    disabled = false,
     models = [],
     modelId = null,
     thinking = "off",
     onmodel,
     onthinking,
   }: {
+    disabled?: boolean;
     models?: { id?: string; provider?: string; name?: string }[];
     modelId?: string | null;
     thinking?: string | null;
@@ -19,6 +21,7 @@
 <div class="panel">
   <label class="muted" for="model-select">Model</label>
   <select
+    {disabled}
     id="model-select"
     value={modelId ?? ""}
     onchange={(e) => {
@@ -34,6 +37,7 @@
   </select>
   <label class="muted" for="think-select" style="margin-top:0.4rem; display:block">Thinking</label>
   <select
+    {disabled}
     id="think-select"
     value={thinking ?? "off"}
     onchange={(e) => onthinking((e.currentTarget as HTMLSelectElement).value)}

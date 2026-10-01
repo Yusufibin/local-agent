@@ -14,6 +14,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -43,6 +44,9 @@ pub struct Sidecar {
     pub watchdog_emitted: Arc<Mutex<bool>>,
     pub silence_timeout: Duration,
     stopping: bool,
+    generation: Arc<AtomicU64>,
+    #[cfg(windows)]
+    job: Option<crate::windows_job::Job>,
 }
 
 impl Sidecar {
@@ -71,6 +75,9 @@ impl Sidecar {
             watchdog_emitted: Arc::new(Mutex::new(false)),
             silence_timeout: SILENCE_WATCHDOG,
             stopping: false,
+            generation: Arc::new(AtomicU64::new(0)),
+            #[cfg(windows)]
+            job: None,
         })
     }
 
@@ -88,6 +95,9 @@ impl Sidecar {
             match child.try_wait() {
                 Ok(Some(status)) => {
                     let code = status.code();
+                    self.generation.fetch_add(1, Ordering::SeqCst);
+                    #[cfg(windows)]
+                    { self.job.take(); }
                     self.child = None;
                     self.rpc = None;
                     let was_running = self.running;
@@ -159,6 +169,11 @@ impl Sidecar {
     }
 
     pub fn spawn_plan(&mut self, plan: SpawnPlan) -> HostResult<Value> {
+        self.stop_process();
+        let generation = self.generation.clone();
+        let reader_generation = generation.fetch_add(1, Ordering::SeqCst) + 1;
+        #[cfg(windows)]
+        let job = crate::windows_job::Job::new()?;
         self.paths.ensure_dirs()?;
         let _ = rotate_if_needed(&plan.stderr_log, MAX_LOG_BYTES, LOG_BACKUPS);
         let stderr_file = OpenOptions::new()
@@ -194,6 +209,15 @@ impl Sidecar {
             }
         };
 
+        #[cfg(windows)]
+        {
+            if let Err(error) = job.assign(&child) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.into());
+            }
+            self.job = Some(job);
+        }
         let pid = child.id() as i32;
         let stdin = child.stdin.take().ok_or_else(|| HostError::from("no stdin"))?;
         let stdout = child
@@ -221,7 +245,18 @@ impl Sidecar {
             pending.clone(),
             ui.clone(),
             oversize.clone(),
-            move |ev| {
+            move |mut ev| {
+                if generation.load(Ordering::SeqCst) != reader_generation {
+                    return;
+                }
+                match &mut ev {
+                    HostEvent::Rpc { event } | HostEvent::UiRequest { request: event } => {
+                        if let Some(object) = event.as_object_mut() {
+                            object.insert("_generation".into(), json!(reader_generation));
+                        }
+                    }
+                    _ => {}
+                }
                 match &ev {
                     HostEvent::Rpc { event } => {
                         match event.get("type").and_then(|v| v.as_str()) {
@@ -272,10 +307,10 @@ impl Sidecar {
         self.last_crash = None;
         (self.sink)(HostEvent::process(ProcessStatus::Spawned, None));
 
+        self.reader = Some(reader);
         match self.get_state_with_timeout(HEALTH_TIMEOUT) {
             Ok(state) => {
                 self.running = false;
-                self.reader = Some(reader);
                 Ok(state)
             }
             Err(e) => {
@@ -301,11 +336,35 @@ impl Sidecar {
 
     fn stop_process(&mut self) {
         self.stopping = true;
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        if let Some(rpc) = &self.rpc {
+            if let Ok(mut pending) = rpc.pending.lock() {
+                pending.fail_all();
+            }
+        }
+        #[cfg(windows)]
+        if let Some(job) = self.job.take() {
+            job.terminate();
+        }
         if let Some(pid) = self.pgid.take() {
+            #[cfg(unix)]
             kill_group(pid, SIGKILL_AFTER);
+            #[cfg(not(unix))]
+            let _ = pid;
         }
         if let Some(mut child) = self.child.take() {
-            let _ = child.wait();
+            let _ = child.kill();
+            let deadline = Instant::now() + SIGKILL_AFTER;
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    _ if Instant::now() >= deadline => {
+                        (self.sink)(HostEvent::log("error", "sidecar did not exit before the deadline"));
+                        break;
+                    }
+                    _ => thread::sleep(Duration::from_millis(20)),
+                }
+            }
         }
         self.rpc = None;
         if let Some(handle) = self.reader.take() {
@@ -334,7 +393,7 @@ impl Sidecar {
 
     pub fn send(&self, command: &str, body: Value) -> HostResult<RpcResponse> {
         let rpc = self.rpc()?;
-        rpc.send_command(command, body).map_err(HostError::from)
+        rpc.send_command(command, body).and_then(RpcResponse::checked).map_err(HostError::from)
     }
 
     pub fn get_state(&self) -> HostResult<Value> {
@@ -423,12 +482,13 @@ impl Sidecar {
     pub fn ui_respond(&self, id: &str, payload: Value) -> HostResult<()> {
         let rpc = self.rpc()?;
         let mut ui = rpc.ui.lock().map_err(|e| HostError::from(e.to_string()))?;
-        if !ui.accept_response(id) {
-            return Ok(());
+        if !ui.open_ids().iter().any(|open| open == id) {
+            return Err("Approval expired or already answered".into());
         }
-        drop(ui);
         let body = UiBridge::build_response(id, &payload);
-        rpc.write_raw(&body).map_err(HostError::from)
+        rpc.write_raw(&body).map_err(HostError::from)?;
+        ui.accept_response(id);
+        Ok(())
     }
 
     pub fn abort_with_queue_restore(&self) -> HostResult<Value> {
@@ -485,7 +545,9 @@ pub fn stderr_tail(path: &std::path::Path, max: usize) -> String {
     if buf.len() <= max {
         buf
     } else {
-        buf[buf.len() - max..].to_string()
+        let mut start = buf.len() - max;
+        while !buf.is_char_boundary(start) { start += 1; }
+        buf[start..].to_string()
     }
 }
 
@@ -513,9 +575,19 @@ pub fn process_alive(pid: u32) -> bool {
     unsafe {
         libc::kill(pid as i32, 0) == 0
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = pid;
-        false
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() { return false; }
+            let mut code = 0;
+            let ok = GetExitCodeProcess(handle, &mut code) != 0;
+            CloseHandle(handle);
+            ok && code == 259
+        }
     }
+    #[cfg(not(any(unix, windows)))]
+    { let _ = pid; false }
 }

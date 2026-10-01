@@ -1,5 +1,6 @@
 <script lang="ts">
   let {
+    disabled = false,
     permissionMode,
     onmode,
     onsecret,
@@ -7,6 +8,7 @@
     onroot,
     expert = false,
   }: {
+    disabled?: boolean;
     permissionMode: string;
     onmode: (mode: string) => void;
     onsecret: (provider: string, key: string) => void;
@@ -23,21 +25,22 @@
   <strong>Settings</strong>
   <div style="margin-top:0.5rem">
     <label class="muted" for="perm">Permission</label>
-    <select id="perm" value={permissionMode} onchange={(e) => onmode((e.currentTarget as HTMLSelectElement).value)}>
+    <select {disabled} id="perm" value={permissionMode} onchange={(e) => onmode((e.currentTarget as HTMLSelectElement).value)}>
       <option value="readonly">readonly</option>
       <option value="ask">ask</option>
       <option value="full">full</option>
     </select>
   </div>
   <div class="row" style="margin-top:0.5rem">
-    <button type="button" onclick={onworkspace}>Workspace…</button>
-    <button type="button" onclick={onroot}>Add root…</button>
+    <button {disabled} type="button" onclick={onworkspace}>Workspace…</button>
+    <button {disabled} type="button" onclick={onroot}>Add root…</button>
   </div>
   <div class="secret-box">
     <label class="muted" for="prov">Provider key</label>
     <input id="prov" bind:value={provider} />
     <input type="password" bind:value={key} placeholder="API key (stored chmod 600)" style="margin-top:0.3rem" />
     <button
+      {disabled}
       type="button"
       style="margin-top:0.3rem"
       onclick={() => {

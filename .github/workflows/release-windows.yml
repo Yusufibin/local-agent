@@ -16,10 +16,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - uses: pnpm/action-setup@v4
+
       - name: Setup Node 22
         uses: actions/setup-node@v4
         with:
           node-version: "22"
+          cache: pnpm
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -62,8 +65,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -f pnpm-lock.yaml
-          npm install
+          pnpm install --frozen-lockfile
+          pnpm check
+          pnpm test
 
       - name: Vendor Node + Pi (Windows)
         shell: bash
@@ -82,7 +86,7 @@ jobs:
 
       - name: Build Windows NSIS installer
         shell: bash
-        run: npx tauri build --bundles nsis
+        run: pnpm tauri build --bundles nsis
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

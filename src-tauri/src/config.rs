@@ -14,7 +14,10 @@ pub const PI_INSTALL_HINT: &str =
 /// app data. HOME is **not** rewritten — bash `~` stays the real user home.
 pub const PI_AGENT_DIR_ENV: &str = "PI_CODING_AGENT_DIR";
 
+#[cfg(not(windows))]
 pub const VENDOR_NODE_REL: &str = "vendor/node/bin/node";
+#[cfg(windows)]
+pub const VENDOR_NODE_REL: &str = "vendor/node/bin/node.exe";
 pub const VENDOR_PI_REL: &str = "vendor/pi/bin/pi";
 pub const VENDOR_PI_CLI_REL: &str =
     "vendor/pi/lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js";
@@ -26,7 +29,7 @@ pub const DEFAULT_DENY_READ_GLOBS: &[&str] = &[
     "**/*.pem",
 ];
 
-const ENV_PASSTHROUGH: &[&str] = &["HOME", "USER", "PATH", "LANG"];
+const ENV_PASSTHROUGH: &[&str] = &["HOME", "USER", "PATH", "LANG", "SystemRoot", "SYSTEMROOT", "COMSPEC", "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA"];
 
 const SECRET_ENV_KEYS: &[&str] = &[
     "ANTHROPIC_API_KEY",

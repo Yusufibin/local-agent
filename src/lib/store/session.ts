@@ -11,10 +11,10 @@ export type TranscriptMessage = {
   id: string;
   role: string;
   content: ContentBlock[];
-  raw?: unknown;
 };
 
 export type ToolCard = {
+  messageId?: string;
   toolCallId: string;
   toolName: string;
   args: unknown;
@@ -51,6 +51,7 @@ export type SessionState = {
   tokensPercent: number | null;
   sessionCost: number | null;
   pendingUi: ExtensionUiRequest[];
+  generation: number;
 };
 
 export const PI_INSTALL_HINT = "npm i -g --ignore-scripts @earendil-works/pi-coding-agent";
@@ -99,6 +100,7 @@ export function initialState(): SessionState {
     tokensPercent: null,
     sessionCost: null,
     pendingUi: [],
+    generation: 0,
   };
 }
 
@@ -125,6 +127,7 @@ function textOf(block: unknown): string {
 }
 
 function blocksFromMessage(message: Record<string, unknown>): ContentBlock[] {
+  if (message.role === "toolResult") return [];
   const content = message.content;
   if (typeof content === "string") return [{ type: "text", text: content }];
   if (!Array.isArray(content)) return [];
@@ -226,7 +229,6 @@ function applyRpc(state: SessionState, event: PiEvent): SessionState {
         id,
         role: String(message.role ?? "assistant"),
         content: blocksFromMessage(message),
-        raw: message,
       };
       return {
         ...state,
@@ -246,7 +248,7 @@ function applyRpc(state: SessionState, event: PiEvent): SessionState {
       const next = blocksFromMessage(message);
       const messages = state.messages.map((m) =>
         m.id === id || (id === null && m === state.messages[state.messages.length - 1])
-          ? { ...m, content: next, raw: message }
+          ? { ...m, content: next, }
           : m,
       );
       return { ...state, messages, partialByIndex: {}, currentMessageId: null };
@@ -255,6 +257,7 @@ function applyRpc(state: SessionState, event: PiEvent): SessionState {
       const id = String(event.toolCallId ?? "");
       const card: ToolCard = {
         toolCallId: id,
+        messageId: ownerOfTool(state.messages, id) ?? state.currentMessageId ?? undefined,
         toolName: String(event.toolName ?? ""),
         args: event.args,
         body: "",
@@ -269,6 +272,7 @@ function applyRpc(state: SessionState, event: PiEvent): SessionState {
       const parsed = toolBody(event.partialResult);
       const card: ToolCard = {
         toolCallId: id,
+        messageId: prev?.messageId ?? ownerOfTool(state.messages, id),
         toolName: String(event.toolName ?? prev?.toolName ?? ""),
         args: event.args ?? prev?.args,
         body: parsed.body,
@@ -361,10 +365,14 @@ function applyUiRequest(state: SessionState, request: ExtensionUiRequest): Sessi
   }
 }
 
-export function reduce(state: SessionState, action: Action): SessionState {
+function reduceAction(state: SessionState, action: Action): SessionState {
   switch (action.type) {
     case "host": {
       const ev = action.event;
+      const tagged = ev.kind === "rpc" ? ev.event : ev.kind === "ui_request" ? ev.request : null;
+      const generation = tagged && typeof tagged._generation === "number" ? tagged._generation : state.generation;
+      if (generation < state.generation) return state;
+      if (generation > state.generation) state = { ...state, generation, pendingUi: [] };
       if (ev.kind === "rpc") return applyRpc(state, ev.event);
       if (ev.kind === "ui_request") return applyUiRequest(state, ev.request);
       if (ev.kind === "process") {
@@ -386,6 +394,7 @@ export function reduce(state: SessionState, action: Action): SessionState {
             runState: "idle",
           };
         }
+        if (ev.status === "exited") return { ...state, runState: "idle", pendingUi: [], crashBanner: "Agent stopped. Restart to continue." };
         return state;
       }
       if (ev.kind === "watchdog") {
@@ -395,6 +404,9 @@ export function reduce(state: SessionState, action: Action): SessionState {
         const msg = ev.message;
         if (msg.includes("npm i -g --ignore-scripts @earendil-works/pi-coding-agent")) {
           return { ...state, missingPi: PI_INSTALL_HINT };
+        }
+        if (ev.level === "error" || ev.level === "warn") {
+          return { ...state, toasts: [...state.toasts, { id: `log-${Date.now()}`, message: msg }] };
         }
         return state;
       }
@@ -407,10 +419,19 @@ export function reduce(state: SessionState, action: Action): SessionState {
           id: String(rec.id ?? `h-${i}`),
           role: String(rec.role ?? "assistant"),
           content: blocksFromMessage(rec),
-          raw: rec,
         };
       });
-      return { ...state, messages, partialByIndex: {}, currentMessageId: null };
+      const toolCards: Record<string, ToolCard> = {};
+      for (const [i, raw] of action.messages.entries()) {
+        const rec = (raw ?? {}) as Record<string, unknown>;
+        if (rec.role !== "toolResult") continue;
+        const id = String(rec.toolCallId ?? "");
+        const result = toolBody(rec);
+        toolCards[id] = { toolCallId: id, messageId: ownerOfTool(messages, id) ?? messages[i]?.id,
+          toolName: String(rec.toolName ?? "tool"), args: undefined, ...result,
+          isError: Boolean(rec.isError), status: "done" };
+      }
+      return { ...state, messages, toolCards, queue: { steering: [], followUp: [] }, pendingUi: [], partialByIndex: {}, currentMessageId: null };
     }
     case "abort_result": {
       const bits = [...action.steering, ...action.followUp].filter(Boolean);
@@ -493,4 +514,41 @@ export function liveAssistantText(state: SessionState): string {
     .filter((b): b is Extract<ContentBlock, { type: "text" }> => b.type === "text")
     .map((b) => b.text)
     .join("");
+}
+function ownerOfTool(messages: TranscriptMessage[], id: string): string | undefined {
+  return [...messages].reverse().find((message) =>
+    message.content.some((block) => block.type === "toolCall" && block.id === id),
+  )?.id;
+}
+
+function bounded(text: string, limit: number): string {
+  return text.length > limit ? text.slice(0, limit) + "\n… (truncated)" : text;
+}
+
+/** Bound retained state as well as rendered output, including restored sessions. */
+export function reduce(state: SessionState, action: Action): SessionState {
+  const next = reduceAction(state, action);
+  if (next === state) return state;
+  const messages = next.messages === state.messages ? state.messages : next.messages.slice(-TRANSCRIPT_WINDOW).map((message) => ({
+    ...message,
+    content: message.content.map((block) => {
+      if (block.type === "text") return { ...block, text: bounded(block.text, 128_000) };
+      if (block.type === "thinking") return { ...block, thinking: bounded(block.thinking, MAX_TOOL_BODY) };
+      return { ...block, argumentsText: bounded(block.argumentsText, MAX_TOOL_BODY) };
+    }),
+  }));
+  const owners = new Set(messages.map((message) => message.id));
+  const toolCards = next.toolCards === state.toolCards && messages === state.messages ? state.toolCards : Object.fromEntries(Object.entries(next.toolCards)
+    .filter(([, card]) => !card.messageId || owners.has(card.messageId))
+    .slice(-TRANSCRIPT_WINDOW)
+    .map(([id, card]) => [id, { ...card, body: bounded(card.body, MAX_TOOL_BODY),
+      diff: card.diff ? bounded(card.diff, MAX_TOOL_BODY) : undefined,
+      patch: card.patch ? bounded(card.patch, MAX_TOOL_BODY) : undefined,
+    }]));
+  const partialByIndex = Object.fromEntries(Object.entries(next.partialByIndex).map(([index, block]) => {
+    if (block.type === "text") return [index, { ...block, text: bounded(block.text, 128_000) }];
+    if (block.type === "thinking") return [index, { ...block, thinking: bounded(block.thinking, MAX_TOOL_BODY) }];
+    return [index, { ...block, argumentsText: bounded(block.argumentsText, MAX_TOOL_BODY) }];
+  }));
+  return { ...next, messages, toolCards, partialByIndex, toasts: next.toasts.slice(-5) };
 }

@@ -9,8 +9,10 @@ use deskpi_lib::sidecar::{kill_group, process_alive, process_group_alive, Sideca
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::fs;
+#[cfg(unix)]
 use std::io::Read;
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -54,13 +56,13 @@ fn spawn_args_env_and_pi_bin_override() {
     let mut host = BTreeMap::new();
     host.insert("HOME".into(), "/home/me".into());
     host.insert("USER".into(), "me".into());
-    host.insert("PATH".into(), "/usr/bin".into());
+    host.insert("PATH".into(), std::env::var("PATH").unwrap());
     host.insert("LANG".into(), "C".into());
     host.insert("PI_BIN".into(), common::fake_pi().display().to_string());
     host.insert("IGNORED".into(), "nope".into());
     let secrets = BTreeMap::new();
     let plan = build_spawn_plan(&paths, &settings, &secrets, &host, None).unwrap();
-    assert_eq!(plan.program, common::fake_pi());
+    assert_eq!(plan.args[0], common::fake_pi().display().to_string());
     assert_eq!(plan.cwd, cwd);
     assert_eq!(plan.env.get("TERM").unwrap(), "dumb");
     assert_eq!(plan.env.get("NO_COLOR").unwrap(), "1");
@@ -164,7 +166,8 @@ fn start_stop_restart_kills_process_group_and_changes_cwd() {
     assert_ne!(pid1, pid2);
     assert!(process_alive(pid2));
     let raw = fs::read_to_string(&state_file).unwrap();
-    assert!(raw.contains(&cwd2.display().to_string()), "{raw}");
+    let saved: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(saved["cwd"].as_str().unwrap(), cwd2.to_str().unwrap());
     sidecar.stop();
     assert!(
         common::wait_until(Duration::from_secs(3), || !process_alive(pid2)),
@@ -177,6 +180,7 @@ fn start_stop_restart_kills_process_group_and_changes_cwd() {
 }
 
 /// Phase 4: killing the app during a bash must not leave a grandchild `sleep`.
+#[cfg(unix)]
 #[test]
 fn kill_group_reaps_bash_grandchild() {
     let mut cmd = Command::new("bash");

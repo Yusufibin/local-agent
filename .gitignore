@@ -26,3 +26,5 @@ packaging/seed/*
 !packaging/seed/opencode-auth.example.json
 !packaging/seed/settings.example.json
 !packaging/seed/.gitignore
+
+/evaluations/results/

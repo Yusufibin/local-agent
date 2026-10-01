@@ -67,9 +67,10 @@ try {
   console.log("production bundle import completed without throw");
 } catch (e) {
   console.log(
-    "production bundle is browser ESM with chat chrome; Node/happy-dom import skipped:",
+    "production bundle failed to execute:",
     e.message,
   );
+  process.exit(1);
 }
 
 const chrome = ["sessions", "transcript", "status"].map((id) =>
@@ -77,9 +78,8 @@ const chrome = ["sessions", "transcript", "status"].map((id) =>
 );
 const composer = document.querySelector('[data-testid="composer-input"]');
 if (chrome.some((n) => !n) || !composer) {
-  console.log(
-    "note: happy-dom did not attach production DOM (vite+happy-dom quirk); bundle still contains chrome and executed without throw",
-  );
+  console.error("Production bundle did not render the required chat controls");
+  process.exit(1);
 } else {
   console.log("frontend production bundle executed; chat chrome present in DOM");
 }

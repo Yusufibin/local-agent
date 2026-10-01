@@ -87,10 +87,7 @@ fn crash_poll_emits_crashed_without_get_state() {
     sidecar.spawn_plan(plan).expect("spawn");
     let pid = sidecar.pgid.unwrap() as u32;
     assert!(process_alive(pid));
-    #[cfg(unix)]
-    unsafe {
-        libc::kill(pid as i32, libc::SIGKILL);
-    }
+    sidecar.child.as_mut().unwrap().kill().unwrap();
     assert!(
         common::wait_until(Duration::from_secs(3), || {
             sidecar.health_tick();

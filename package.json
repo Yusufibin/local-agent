@@ -15,7 +15,9 @@
     "golden": "node scripts/golden-path-recap.mjs",
     "golden:offline": "node scripts/golden-path-offline.mjs",
     "package:appimage": "bash scripts/package-appimage.sh",
-    "vendor:runtime": "bash scripts/vendor-runtime.sh"
+    "vendor:runtime": "bash scripts/vendor-runtime.sh",
+    "verify": "pnpm check && pnpm test && pnpm build && pnpm test:rust",
+    "eval": "node scripts/evaluate-agent.mjs"
   },
   "license": "MIT",
   "dependencies": {
@@ -34,6 +36,9 @@
     "vitest": "^3.2.4"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild"]
-  }
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  },
+  "packageManager": "pnpm@10.17.1"
 }

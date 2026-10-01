@@ -9,310 +9,299 @@
   import Settings from "./lib/components/Settings.svelte";
   import { api } from "./lib/api";
   import { listenHostEvents } from "./lib/events";
-  import {
-    initialState,
-    planComposerSubmit,
-    reduce,
-    SILENCE_MS,
-    type SessionState,
-  } from "./lib/store/session";
+  import { initialState, planComposerSubmit, reduce, SILENCE_MS, type SessionState } from "./lib/store/session";
   import type { HostEvent } from "./lib/protocol/events";
 
   let state: SessionState = $state(initialState());
   let sessions: { path: string; id?: string; name?: string; timestamp?: string }[] = $state([]);
   let models: { id?: string; provider?: string; name?: string }[] = $state([]);
   let chromeOpen = $state(false);
+  let starting = $state(true);
+  let sending = $state(false);
+  let transitioning = $state(false);
+  let responding = $state(false);
+  let loadingHistory = $state(false);
+  let history: SessionState | null = $state(null);
+  let historyBefore = $state(0);
+  let hasEarlier = $state(false);
+  let failure: { message: string; retry?: () => Promise<void> } | null = $state(null);
   let unlisten: (() => void) | undefined;
-  let statsTimer: ReturnType<typeof setInterval> | undefined;
   let watchdogTimer: ReturnType<typeof setInterval> | undefined;
+  let statsTimer: ReturnType<typeof setInterval> | undefined;
   let lastEventAt = Date.now();
+  let epoch = 0;
+  let destroyed = false;
+  let statsPending = false;
 
-  function toggleChrome() {
-    chromeOpen = !chromeOpen;
+  const busy = $derived(starting || transitioning);
+  const status = $derived(starting ? "Starting…" : transitioning ? "Loading session…" :
+    state.crashBanner ? "Agent unavailable" : state.pendingUi.length ? "Waiting for approval" :
+    state.runState === "running" ? "Working…" : "Ready");
+
+  function report(label: string, error: unknown, retry?: () => Promise<void>) {
+    failure = { message: label + ": " + String(error), retry };
   }
 
   function apply(event: HostEvent) {
+    if (destroyed || transitioning) return;
     lastEventAt = Date.now();
     state = reduce(state, { type: "host", event });
+    if (event.kind === "rpc" && event.event.type === "message_start") hasEarlier = true;
+    if (event.kind === "rpc" && event.event.type === "agent_settled") {
+      void refreshStats();
+      void refreshSessions();
+    }
   }
 
   async function refreshSessions() {
+    const requestEpoch = epoch;
     try {
-      sessions = (await api.listSessions()) as typeof sessions;
-    } catch {
-      sessions = [];
-    }
+      const result = await api.listSessions();
+      if (!destroyed && requestEpoch === epoch) sessions = result as typeof sessions;
+    } catch (error) { report("Unable to load sessions", error, refreshSessions); }
   }
 
   async function refreshModels() {
+    const requestEpoch = epoch;
     try {
-      const r = await api.getAvailableModels();
-      models = (r.models as typeof models) ?? [];
-    } catch {
-      models = [];
-    }
+      const result = await api.getAvailableModels();
+      if (!destroyed && requestEpoch === epoch) models = (result.models as typeof models) ?? [];
+    } catch (error) { report("Unable to load models", error, refreshModels); }
   }
 
   async function refreshStats() {
+    if (statsPending || busy || destroyed) return;
+    statsPending = true;
+    const requestEpoch = epoch;
     try {
       const stats = await api.getSessionStats();
-      state = reduce(state, { type: "set_stats", stats });
-    } catch {
-      /* sidecar idle */
-    }
+      if (!destroyed && requestEpoch === epoch) state = reduce(state, { type: "set_stats", stats });
+    } catch { /* Keep the last known counters; connection errors are shown by the host events. */ }
+    finally { statsPending = false; }
+  }
+
+  async function hydrateFromSession() {
+    const requestEpoch = epoch;
+    const page = await api.getMessages();
+    const current = await api.getState();
+    if (destroyed || requestEpoch !== epoch) return;
+    const model = current.model as { id?: string } | undefined;
+    state = reduce(state, { type: "hydrate", messages: page.messages });
+    state = reduce(state, { type: "set_model", modelId: model?.id ?? null,
+      thinkingLevel: (current.thinkingLevel as string) ?? null });
+    state = { ...state, runState: current.isStreaming ? "running" : "idle" };
+    hasEarlier = page.hasMore;
+    historyBefore = page.before;
+    history = null;
   }
 
   async function bootstrap() {
+    starting = true;
+    failure = null;
     try {
       const settings = await api.getSettings();
-      state = reduce(state, {
-        type: "set_workspace",
-        activeRoot: (settings.activeRoot as string) ?? null,
-        permissionMode: (settings.permissionMode as string) ?? "ask",
-      });
-    } catch {
-      /* browser / no tauri */
-    }
-    try {
-      const st = await api.getState();
-      if (st?.missingPi) {
-        apply({ kind: "log", level: "error", message: String(st.install ?? st.missingPi) });
-      } else if (st?.crashed) {
-        apply({
-          kind: "process",
-          status: "crashed",
-          message: String(st.stderr ?? ""),
-        });
-      } else {
-        const model = st?.model as { id?: string } | undefined;
-        state = reduce(state, {
-          type: "set_model",
-          modelId: model?.id ?? null,
-          thinkingLevel: (st?.thinkingLevel as string) ?? null,
-        });
-      }
-    } catch {
-      /* ignore */
-    }
-    try {
+      state = reduce(state, { type: "set_workspace", activeRoot: (settings.activeRoot as string) ?? null,
+        permissionMode: (settings.permissionMode as string) ?? "ask" });
+      if (!state.activeRoot) { chromeOpen = true; return; }
       await api.agentStart();
-      const st = await api.getState();
-      const model = st?.model as { id?: string } | undefined;
-      if (model?.id) {
-        state = reduce(state, { type: "set_model", modelId: model.id });
-      }
-      const msgs = await api.getMessages();
-      if (msgs?.messages) state = reduce(state, { type: "hydrate", messages: msgs.messages });
-    } catch (e) {
-      const msg = String(e);
-      if (msg.includes("npm i -g")) {
-        apply({ kind: "log", level: "error", message: msg });
-      }
-    }
-    await refreshSessions();
-    await refreshModels();
-    await refreshStats();
+      await hydrateFromSession();
+      await refreshSessions();
+      await refreshModels();
+    } catch (error) { report("Unable to start the agent", error, bootstrap); }
+    finally { starting = false; await refreshStats(); }
   }
 
   onMount(() => {
-    listenHostEvents((ev) => {
-      apply(ev);
-      if (ev.kind === "rpc" && ev.event.type === "agent_settled") {
-        refreshStats();
-        if (statsTimer) {
-          clearInterval(statsTimer);
-          statsTimer = undefined;
-        }
-      }
-      if (ev.kind === "rpc" && ev.event.type === "agent_start") {
-        if (!statsTimer) statsTimer = setInterval(refreshStats, 2000);
-      }
-    }).then((u) => {
-      unlisten = u;
-    });
+    void (async () => {
+      try {
+        const stopListening = await listenHostEvents(apply);
+        if (destroyed) { stopListening(); return; }
+        unlisten = stopListening;
+        await bootstrap();
+      } catch (error) { starting = false; report("Unable to connect", error); }
+    })();
+    statsTimer = setInterval(() => {
+      if (state.runState === "running") void refreshStats();
+    }, 2000);
     watchdogTimer = setInterval(() => {
-      if (state.runState !== "running" || state.silenceBanner) return;
-      const dt = Date.now() - lastEventAt;
-      if (dt >= SILENCE_MS) {
-        state = reduce(state, { type: "silence", silenceMs: dt });
-      }
+      if (state.runState !== "running" || state.silenceBanner || transitioning) return;
+      const silenceMs = Date.now() - lastEventAt;
+      if (silenceMs >= SILENCE_MS) state = reduce(state, { type: "silence", silenceMs });
     }, 5000);
-    bootstrap();
   });
 
   onDestroy(() => {
+    destroyed = true;
+    epoch++;
     unlisten?.();
     if (statsTimer) clearInterval(statsTimer);
     if (watchdogTimer) clearInterval(watchdogTimer);
   });
 
-  async function restartSidecar() {
-    state = reduce(state, { type: "restarting" });
-    try {
-      await api.agentRestart();
-      state = reduce(state, { type: "restarted" });
-      const st = await api.getState();
-      const model = st?.model as { id?: string } | undefined;
-      if (model?.id) {
-        state = reduce(state, { type: "set_model", modelId: model.id });
-      }
-      await hydrateFromSession();
-      await refreshModels();
-      await refreshStats();
-    } catch (e) {
-      apply({ kind: "process", status: "crashed", message: String(e) });
+  async function transition(label: string, action: () => Promise<unknown>, allowRunning = false) {
+    if (busy || sending || responding) return;
+    if (state.runState === "running" && !allowRunning) {
+      report(label, "Stop the current task before changing sessions or settings.");
+      return;
     }
+    transitioning = true;
+    epoch++;
+    failure = null;
+    try {
+      await action();
+      const settings = await api.getSettings();
+      state = reduce(state, { type: "set_workspace", activeRoot: (settings.activeRoot as string) ?? null,
+        permissionMode: (settings.permissionMode as string) ?? "ask" });
+      if (state.activeRoot) {
+        await hydrateFromSession();
+        await refreshSessions();
+        await refreshModels();
+      }
+    } catch (error) { report(label, error, async () => { await transition(label, action, allowRunning); }); }
+    finally { transitioning = false; lastEventAt = Date.now(); await refreshStats(); }
+  }
+
+  async function restartSidecar() {
+    await transition("Unable to restart", () => api.agentRestart(), true);
   }
 
   async function submit(kind: "enter" | "alt-enter") {
+    if (sending || busy || !state.activeRoot || state.crashBanner) return;
     const intent = planComposerSubmit(state, state.composer, { kind });
-    if (intent.op === "none") return;
-    const text = "text" in intent ? intent.text : "";
-    state = reduce(state, { type: "set_composer", text: "" });
+    if (intent.op === "none" || intent.op === "abort") return;
+    const draft = state.composer;
+    const requestEpoch = epoch;
+    sending = true;
+    failure = null;
+    history = null;
     try {
-      if (intent.op === "prompt") await api.prompt(text);
-      if (intent.op === "steer") await api.steer(text);
-      if (intent.op === "follow_up") await api.followUp(text);
-    } catch (e) {
-      state = reduce(state, {
-        type: "host",
-        event: { kind: "log", level: "error", message: String(e) },
-      });
-    }
+      if (intent.op === "prompt") await api.prompt(intent.text);
+      if (intent.op === "steer") await api.steer(intent.text);
+      if (intent.op === "follow_up") await api.followUp(intent.text);
+      if (requestEpoch === epoch && state.composer === draft) {
+        state = reduce(state, { type: "set_composer", text: "" });
+      }
+    } catch (error) { report("Message was not confirmed. Your draft is preserved", error); }
+    finally { sending = false; }
   }
 
   async function abort() {
+    if (busy) return;
     try {
       const data = await api.abort();
-      state = reduce(state, {
-        type: "abort_result",
-        steering: data.steering ?? [],
-        followUp: data.followUp ?? [],
-      });
-    } catch {
-      /* ignore */
-    }
+      state = reduce(state, { type: "abort_result", steering: data.steering ?? [], followUp: data.followUp ?? [] });
+    } catch (error) { report("Unable to stop the task", error, abort); }
   }
 
-  async function hydrateFromSession() {
+  async function respond(id: string, payload: Record<string, unknown>) {
+    if (responding) return;
+    responding = true;
     try {
-      const msgs = await api.getMessages();
-      if (msgs?.messages) state = reduce(state, { type: "hydrate", messages: msgs.messages });
-    } catch {
-      /* ignore */
-    }
+      const result = await api.uiRespond(id, payload);
+      state = reduce(state, { type: "dismiss_ui", id });
+      if (!result.accepted) report("Approval expired", "The agent is no longer waiting for this response.");
+    } catch (error) { report("Unable to send approval", error); }
+    finally { responding = false; }
+  }
+
+  async function loadEarlier() {
+    if (loadingHistory || busy) return;
+    const requestEpoch = epoch;
+    loadingHistory = true;
+    try {
+      const before = history ? historyBefore : (await api.getMessages()).before;
+      const page = await api.getMessages(before);
+      if (requestEpoch !== epoch || destroyed) return;
+      history = reduce(initialState(), { type: "hydrate", messages: page.messages });
+      historyBefore = page.before;
+      hasEarlier = page.hasMore;
+    } catch (error) { report("Unable to load earlier messages", error, loadEarlier); }
+    finally { loadingHistory = false; }
+  }
+
+  async function latest() {
+    if (loadingHistory || busy) return;
+    loadingHistory = true;
+    try { await hydrateFromSession(); }
+    catch (error) { report("Unable to load latest messages", error, latest); }
+    finally { loadingHistory = false; }
+  }
+
+  async function changeModel(provider: string, id: string) {
+    try {
+      await api.setModel(provider, id);
+      state = reduce(state, { type: "set_model", modelId: id });
+    } catch (error) { report("Unable to change model", error); }
+  }
+
+  async function changeThinking(level: string) {
+    try {
+      await api.setThinkingLevel(level);
+      state = reduce(state, { type: "set_model", modelId: state.modelId, thinkingLevel: level });
+    } catch (error) { report("Unable to change thinking level", error); }
   }
 </script>
 
 <div class="shell" class:chrome-open={chromeOpen} data-testid="shell">
-  <button
-    type="button"
-    class="chrome-toggle"
-    data-testid="chrome-toggle"
-    aria-label={chromeOpen ? "Hide sidebar" : "Show sidebar"}
-    aria-expanded={chromeOpen}
-    aria-controls="app-sidebar"
-    onclick={toggleChrome}
-  >
-    ☰
-  </button>
-  <aside
-    class="sidebar"
-    id="app-sidebar"
-    data-testid="sidebar"
-    aria-hidden={!chromeOpen}
-    inert={chromeOpen ? undefined : true}
-  >
+  <button type="button" class="chrome-toggle" data-testid="chrome-toggle"
+    aria-label={chromeOpen ? "Hide sidebar" : "Show sidebar"} aria-expanded={chromeOpen}
+    aria-controls="app-sidebar" onclick={() => (chromeOpen = !chromeOpen)}>☰</button>
+  <aside class="sidebar" id="app-sidebar" data-testid="sidebar" aria-hidden={!chromeOpen}
+    inert={chromeOpen ? undefined : true}>
     <div class="sidebar-inner">
-      <SessionList
-        {sessions}
-        onnew={async () => {
-          await api.newSession();
-          await hydrateFromSession();
-          await refreshSessions();
-        }}
-        onopen={async (path) => {
-          await api.switchSession(path);
-          await hydrateFromSession();
-        }}
-      />
-      <ModelPicker
-        {models}
-        modelId={state.modelId}
-        thinking={state.thinkingLevel}
-        onmodel={(provider, id) => {
-          api.setModel(provider, id).then(() => {
-            state = reduce(state, { type: "set_model", modelId: id });
-          });
-        }}
-        onthinking={(level) => {
-          api.setThinkingLevel(level).then(() => {
-            state = reduce(state, { type: "set_model", modelId: state.modelId, thinkingLevel: level });
-          });
-        }}
-      />
-      <Settings
-        permissionMode={state.permissionMode}
-        onmode={async (mode) => {
-          await api.setPermissionMode(mode);
-          state = reduce(state, { type: "set_workspace", activeRoot: state.activeRoot, permissionMode: mode });
-        }}
-        onsecret={(provider, key) => api.saveSecret(provider, key)}
-        onworkspace={async () => {
-          const r = (await api.pickWorkspace()) as { activeRoot?: string };
-          if (r?.activeRoot) {
-            state = reduce(state, { type: "set_workspace", activeRoot: r.activeRoot });
-          }
-        }}
-        onroot={() => api.addRoot()}
-      />
+      <SessionList {sessions} disabled={busy || state.runState === "running"}
+        onnew={() => transition("Unable to create session", () => api.newSession())}
+        onopen={(path) => transition("Unable to open session", () => api.switchSession(path))} />
+      <ModelPicker {models} modelId={state.modelId} thinking={state.thinkingLevel}
+        disabled={busy} onmodel={changeModel} onthinking={changeThinking} />
+      <Settings permissionMode={state.permissionMode} disabled={busy || state.runState === "running"}
+        onmode={(mode) => transition("Unable to change permissions", () => api.setPermissionMode(mode))}
+        onsecret={async (provider, key) => { await transition("Unable to save key", () => api.saveSecret(provider, key)); }}
+        onworkspace={() => transition("Unable to change workspace", () => api.pickWorkspace())}
+        onroot={() => transition("Unable to add workspace root", () => api.addRoot())} />
     </div>
   </aside>
   <section class="main" class:empty={state.messages.length === 0}>
-    <div class="main-top"></div>
-    {#if state.crashBanner || state.silenceBanner}
-      <div
-        class="banner health"
-        class:silence={!!state.silenceBanner && !state.crashBanner}
-        data-testid="health-banner"
-      >
-        <span class="grow">{state.crashBanner ?? state.silenceBanner}</span>
-        <button type="button" class="primary" data-testid="restart-sidecar" onclick={restartSidecar}>
-          Restart sidecar
-        </button>
+    <div class="main-top" role="status" aria-live="polite">{status}</div>
+    {#if failure}
+      <div class="banner error-banner" role="alert" data-testid="error-banner">
+        <span class="grow">{failure.message}</span>
+        {#if failure.retry}<button type="button" disabled={busy} onclick={() => failure?.retry?.()}>Retry</button>{/if}
+        <button type="button" aria-label="Dismiss error" onclick={() => (failure = null)}>Dismiss</button>
       </div>
     {/if}
-    <Chat session={state} />
+    {#if state.crashBanner || state.silenceBanner}
+      <div class="banner health" data-testid="health-banner">
+        <span class="grow">{state.crashBanner ?? state.silenceBanner}</span>
+        <button type="button" class="primary" disabled={busy} data-testid="restart-sidecar" onclick={restartSidecar}>Restart agent</button>
+      </div>
+    {/if}
+    <Chat session={history ?? state} historical={history !== null} {hasEarlier}
+      loading={loadingHistory} onearlier={loadEarlier} onlatest={latest} />
     {#if state.queue.steering.length || state.queue.followUp.length}
       <div class="chips">
-        {#each state.queue.steering as s}<span class="chip">steer: {s}</span>{/each}
-        {#each state.queue.followUp as s}<span class="chip">follow: {s}</span>{/each}
+        {#each state.queue.steering as text}<span class="chip">steer: {text}</span>{/each}
+        {#each state.queue.followUp as text}<span class="chip">follow: {text}</span>{/each}
       </div>
     {/if}
-    <Composer bind:value={state.composer} running={state.runState === "running"} onsubmit={submit} onabort={abort} />
+    <Composer bind:value={state.composer} running={state.runState === "running"} {sending}
+      disabled={busy || !state.activeRoot || !!state.crashBanner} onsubmit={submit} onabort={abort} />
   </section>
-  <StatusBar
-    expanded={chromeOpen}
-    modelId={state.modelId}
-    tokensPercent={state.tokensPercent}
-    sessionCost={state.sessionCost}
-    permissionMode={state.permissionMode}
-    activeRoot={state.activeRoot}
-    extras={state.statusEntries}
-  />
+  <StatusBar expanded={chromeOpen} modelId={state.modelId} tokensPercent={state.tokensPercent}
+    sessionCost={state.sessionCost} permissionMode={state.permissionMode} activeRoot={state.activeRoot} extras={state.statusEntries} />
 </div>
 
 {#if state.pendingUi[0]}
-  <ApprovalModal
-    request={state.pendingUi[0]}
-    onrespond={(payload) => {
-      const id = state.pendingUi[0].id;
-      api.uiRespond(id, payload);
-      state = reduce(state, { type: "dismiss_ui", id });
-    }}
-  />
+  {#key state.pendingUi[0].id}
+    <ApprovalModal request={state.pendingUi[0]} busy={responding}
+      onrespond={(payload) => respond(state.pendingUi[0].id, payload)} />
+  {/key}
 {/if}
 
-{#each state.toasts as t}
-  <div class="toast">{t.message}</div>
+{#each state.toasts as toast}
+  <div class="toast" role="status">
+    {toast.message}
+    <button type="button" aria-label="Dismiss notification"
+      onclick={() => (state = { ...state, toasts: state.toasts.filter((item) => item.id !== toast.id) })}>×</button>
+  </div>
 {/each}

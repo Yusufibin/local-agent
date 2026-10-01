@@ -68,6 +68,11 @@ pub fn resolve_pi_launch(
 ) -> Result<PiLaunch, String> {
     let pi = resolve_pi_bin(pi_bin, path_env, vendor_roots)?;
     let explicit = pi_bin.map(str::trim).filter(|s| !s.is_empty()).is_some();
+    if matches!(pi.extension().and_then(|e| e.to_str()), Some("js" | "mjs")) {
+        let node = vendored_node(vendor_roots).or_else(|| which_in_path("node", path_env))
+            .ok_or_else(|| "Node is required to launch the Pi JavaScript entry point".to_string())?;
+        return Ok(PiLaunch { program: node, leading_args: vec![pi.display().to_string()] });
+    }
     if !explicit {
         if let Some(node) = vendored_node(vendor_roots) {
             if vendored_pi(vendor_roots).as_ref() == Some(&pi) {
@@ -85,32 +90,37 @@ pub fn resolve_pi_launch(
 }
 
 pub fn which_in_path(name: &str, path_env: Option<&str>) -> Option<PathBuf> {
-    let path = path_env?;
-    for dir in path.split(':') {
-        if dir.is_empty() {
+    for dir in std::env::split_paths(path_env?) {
+        if dir.as_os_str().is_empty() {
             continue;
         }
-        let candidate = Path::new(dir).join(name);
+        let candidate = dir.join(name);
         if candidate.is_file() {
             return Some(candidate);
+        }
+        #[cfg(windows)]
+        for extension in ["exe", "cmd", "bat"] {
+            let candidate = dir.join(format!("{name}.{extension}"));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
         }
     }
     None
 }
 
 fn prepend_path_dir(path: &mut String, dir: &Path) {
-    let dir = dir.display().to_string();
-    if dir.is_empty() {
+    if dir.as_os_str().is_empty() {
         return;
     }
-    if path.is_empty() {
-        *path = dir;
+    let mut entries: Vec<PathBuf> = std::env::split_paths(path).collect();
+    if entries.iter().any(|entry| entry == dir) {
         return;
     }
-    if path.split(':').any(|p| p == dir) {
-        return;
+    entries.insert(0, dir.to_path_buf());
+    if let Ok(joined) = std::env::join_paths(entries) {
+        *path = joined.to_string_lossy().into_owned();
     }
-    *path = format!("{dir}:{path}");
 }
 
 fn first_existing(candidates: &[PathBuf]) -> Option<PathBuf> {
@@ -274,7 +284,7 @@ mod bundle_tests {
         let tmp = tempfile::tempdir().unwrap();
         let runtime = tmp.path().join("agent-runtime");
         write_runtime_tree(&runtime);
-        let node = runtime.join("vendor/node/bin/node");
+        let node = runtime.join(VENDOR_NODE_REL);
         let pi = runtime.join("vendor/pi/bin/pi");
         fs::create_dir_all(node.parent().unwrap()).unwrap();
         fs::create_dir_all(pi.parent().unwrap()).unwrap();
@@ -309,7 +319,7 @@ mod bundle_tests {
         let node_dir = node.parent().unwrap().display().to_string();
         let pi_dir = pi.parent().unwrap().display().to_string();
         assert!(
-            path.split(':').next() == Some(node_dir.as_str()),
+            std::env::split_paths(path).next() == Some(PathBuf::from(&node_dir)),
             "PATH should start with vendored node bin: {path}"
         );
         assert!(path.contains(&pi_dir), "PATH should include vendored pi bin: {path}");

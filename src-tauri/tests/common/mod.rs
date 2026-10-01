@@ -34,7 +34,8 @@ pub struct LiveSidecar {
 }
 
 pub fn spawn_fake(scenario: &str, extra_env: &[(&str, &str)]) -> LiveSidecar {
-    let mut cmd = Command::new(&fake_pi());
+    let mut cmd = Command::new("node");
+    cmd.arg(fake_pi());
     cmd.arg("--mode")
         .arg("rpc")
         .stdin(Stdio::piped())
@@ -92,4 +93,12 @@ pub fn event_types(events: &Arc<Mutex<Vec<HostEvent>>>) -> Vec<String> {
             HostEvent::Watchdog { silence_ms } => format!("watchdog:{silence_ms}"),
         })
         .collect()
+}
+
+impl Drop for LiveSidecar {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Ok(mut pending) = self.rpc.pending.lock() { pending.fail_all(); }
+    }
 }

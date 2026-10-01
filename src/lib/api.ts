@@ -2,8 +2,19 @@
 
 export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const { invoke: tauriInvoke } = await import("@tauri-apps/api/core");
-  return tauriInvoke<T>(cmd, args);
+  const result = await tauriInvoke<T>(cmd, args);
+  assertRpcSuccess(result);
+  return result;
 }
+
+export function assertRpcSuccess(value: unknown): void {
+  if (value && typeof value === "object" && "success" in value && value.success === false) {
+    const error = "error" in value ? value.error : "Agent rejected the request";
+    throw new Error(String(error ?? "Agent rejected the request"));
+  }
+}
+
+export type HistoryPage = { messages: unknown[]; total: number; before: number; hasMore: boolean };
 
 export const api = {
   agentStart: () => invoke("agent_start"),
@@ -18,7 +29,7 @@ export const api = {
   switchSession: (path: string) => invoke("switch_session", { path }),
   listSessions: () => invoke<unknown[]>("list_sessions"),
   getState: () => invoke<Record<string, unknown>>("get_state"),
-  getMessages: () => invoke<{ messages?: unknown[] }>("get_messages"),
+  getMessages: (before?: number) => invoke<HistoryPage>("get_messages", { before, limit: 200 }),
   setModel: (provider: string, modelId: string) =>
     invoke("set_model", { provider, modelId }),
   setThinkingLevel: (level: string) => invoke("set_thinking_level", { level }),
@@ -27,7 +38,7 @@ export const api = {
   compact: () => invoke("compact"),
   getCommands: () => invoke("get_commands"),
   uiRespond: (id: string, payload: Record<string, unknown>) =>
-    invoke("ui_respond", { id, payload }),
+    invoke<{ accepted: boolean }>("ui_respond", { id, payload }),
   pickWorkspace: () => invoke("pick_workspace"),
   saveSecret: (provider: string, key: string) => invoke("save_secret", { provider, key }),
   getSettings: () => invoke<Record<string, unknown>>("get_settings"),

@@ -67,15 +67,11 @@ fn rpc_session(state: &AppState) -> HostResult<RpcSession> {
     lock_sidecar(state)?.rpc_clone()
 }
 
-fn cap_messages(mut data: Value) -> Value {
-    if let Some(arr) = data.get_mut("messages").and_then(|v| v.as_array_mut()) {
-        if arr.len() > MAX_UI_MESSAGES {
-            let skip = arr.len() - MAX_UI_MESSAGES;
-            arr.drain(0..skip);
-            data["truncatedFrom"] = json!(skip);
-        }
+fn require_idle(state: &AppState) -> HostResult<()> {
+    if lock_sidecar(state)?.is_streaming() {
+        return Err("Stop the current task before changing sessions or workspace settings".into());
     }
-    data
+    Ok(())
 }
 
 fn pick_folder_blocking(app: &AppHandle) -> Option<PathBuf> {
@@ -90,6 +86,7 @@ fn pick_folder_blocking(app: &AppHandle) -> Option<PathBuf> {
 fn send_rpc(state: &AppState, command: &str, body: Value) -> HostResult<crate::rpc::RpcResponse> {
     rpc_session(state)?
         .send_command(command, body)
+        .and_then(crate::rpc::RpcResponse::checked)
         .map_err(|e| e.into())
 }
 
@@ -131,7 +128,7 @@ pub fn prompt(
     if let Some(behavior) = behavior {
         body["streamingBehavior"] = json!(behavior);
     }
-    let resp = rpc.send_command("prompt", body).map_err(crate::error::HostError::from)?;
+    let resp = rpc.send_command("prompt", body).and_then(crate::rpc::RpcResponse::checked).map_err(crate::error::HostError::from)?;
     Ok(json!({
         "success": resp.success,
         "error": resp.error,
@@ -156,20 +153,23 @@ pub fn abort(state: State<AppState>) -> HostResult<Value> {
     let rpc = rpc_session(&state)?;
     let clear = rpc
         .send_command("clear_queue", json!({}))
+        .and_then(crate::rpc::RpcResponse::checked)
         .map_err(crate::error::HostError::from)?;
     let data = clear.data.clone().unwrap_or(json!({}));
-    let _ = rpc.send_command("abort", json!({}));
+    rpc.send_command("abort", json!({})).and_then(crate::rpc::RpcResponse::checked).map_err(crate::error::HostError::from)?;
     Ok(data)
 }
 
 #[tauri::command]
 pub fn new_session(state: State<AppState>) -> HostResult<Value> {
+    require_idle(&state)?;
     let resp = send_rpc(&state, "new_session", json!({}))?;
     Ok(resp.data.unwrap_or(json!({})))
 }
 
 #[tauri::command]
 pub fn switch_session(state: State<AppState>, path: String) -> HostResult<Value> {
+    require_idle(&state)?;
     let resp = send_rpc(&state, "switch_session", json!({ "sessionPath": path }))?;
     Ok(resp.data.unwrap_or(json!({})))
 }
@@ -198,14 +198,15 @@ pub fn get_state(state: State<AppState>) -> HostResult<Value> {
     };
     let resp = rpc
         .send_command("get_state", json!({}))
+        .and_then(crate::rpc::RpcResponse::checked)
         .map_err(crate::error::HostError::from)?;
     Ok(resp.data.unwrap_or(json!({})))
 }
 
 #[tauri::command]
-pub fn get_messages(state: State<AppState>) -> HostResult<Value> {
+pub fn get_messages(state: State<AppState>, before: Option<usize>, limit: Option<usize>) -> HostResult<Value> {
     let resp = send_rpc(&state, "get_messages", json!({}))?;
-    Ok(cap_messages(resp.data.unwrap_or(json!({ "messages": [] }))))
+    Ok(crate::history::page(resp.data.unwrap_or(json!({ "messages": [] })), before, limit))
 }
 
 #[tauri::command]
@@ -249,15 +250,16 @@ pub fn get_commands(state: State<AppState>) -> HostResult<Value> {
 }
 
 #[tauri::command]
-pub fn ui_respond(state: State<AppState>, id: String, payload: Value) -> HostResult<()> {
+pub fn ui_respond(state: State<AppState>, id: String, payload: Value) -> HostResult<Value> {
     let rpc = rpc_session(&state)?;
     let mut ui = rpc.ui.lock().map_err(|e| e.to_string())?;
-    if !ui.accept_response(&id) {
-        return Ok(());
+    if !ui.open_ids().iter().any(|open| open == &id) {
+        return Ok(json!({ "accepted": false }));
     }
-    drop(ui);
     let body = crate::bridge::UiBridge::build_response(&id, &payload);
-    rpc.write_raw(&body).map_err(crate::error::HostError::from)
+    rpc.write_raw(&body).map_err(crate::error::HostError::from)?;
+    ui.accept_response(&id);
+    Ok(json!({ "accepted": true }))
 }
 
 #[tauri::command]
@@ -270,6 +272,7 @@ pub async fn pick_workspace(app: AppHandle, state: State<'_, AppState>) -> HostR
     let Some(path) = folder else {
         return Ok(json!({ "cancelled": true }));
     };
+    require_idle(&state)?;
     let mut sc = lock_sidecar(&state)?;
     sc.settings.active_root = Some(path.clone());
     if !sc.settings.roots.iter().any(|r| r == &path) {
@@ -301,6 +304,7 @@ pub fn get_settings(state: State<AppState>) -> HostResult<Settings> {
 
 #[tauri::command]
 pub fn set_permission_mode(state: State<AppState>, mode: String) -> HostResult<Value> {
+    require_idle(&state)?;
     if !matches!(mode.as_str(), "ask" | "full" | "readonly") {
         return Err("mode must be ask|full|readonly".into());
     }
@@ -323,6 +327,7 @@ pub async fn add_root(app: AppHandle, state: State<'_, AppState>) -> HostResult<
     let Some(path) = folder else {
         return Ok(json!({ "cancelled": true }));
     };
+    require_idle(&state)?;
     let mut sc = lock_sidecar(&state)?;
     if !sc.settings.roots.iter().any(|r| r == &path) {
         sc.settings.roots.push(path.clone());

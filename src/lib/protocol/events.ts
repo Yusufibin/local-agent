@@ -15,6 +15,7 @@ export type ExtensionUiRequest = {
   placeholder?: string;
   prefill?: string;
   timeout?: number;
+  _generation?: number;
   notifyType?: string;
   statusKey?: string;
   statusText?: string;

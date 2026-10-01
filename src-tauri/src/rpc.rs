@@ -16,7 +16,7 @@ use uuid::Uuid;
 pub const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub fn command_uses_default_timeout(command: &str) -> bool {
-    !matches!(command, "prompt" | "compact" | "bash")
+    !matches!(command, "compact" | "bash")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,6 +30,17 @@ pub struct RpcResponse {
     pub data: Option<Value>,
     #[serde(default)]
     pub error: Option<String>,
+}
+
+impl RpcResponse {
+    pub fn checked(self) -> Result<Self, String> {
+        if self.success != Some(true) {
+            return Err(self.error.clone().unwrap_or_else(|| format!(
+                "{} failed", self.command.as_deref().unwrap_or("RPC command")
+            )));
+        }
+        Ok(self)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +66,8 @@ impl PendingMap {
             inner: HashMap::new(),
         }
     }
+
+    pub fn is_empty(&self) -> bool { self.inner.is_empty() }
 
     pub fn insert(&mut self, id: String, tx: Sender<RpcResponse>) {
         self.inner.insert(id, tx);
@@ -168,12 +181,11 @@ impl RpcSession {
             let mut pending = self.pending.lock().map_err(|e| e.to_string())?;
             pending.insert(id.clone(), tx);
         }
-        {
-            let mut stdin = self.stdin.lock().map_err(|e| e.to_string())?;
-            let mut bytes = serde_json::to_vec(&body).map_err(|e| e.to_string())?;
-            bytes.push(b'\n');
-            stdin.write_all(&bytes).map_err(|e| e.to_string())?;
-            stdin.flush().map_err(|e| e.to_string())?;
+        if let Err(error) = self.write_raw(&body) {
+            if let Ok(mut pending) = self.pending.lock() {
+                pending.cancel(&id);
+            }
+            return Err(error);
         }
         match timeout {
             Some(d) => match rx.recv_timeout(d) {

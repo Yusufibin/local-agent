@@ -1,22 +1,82 @@
-name: Rust
+name: Quality
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [main, "codex/**"]
   pull_request:
-    branches: [ "main" ]
+    branches: [main]
+  workflow_dispatch:
 
-env:
-  CARGO_TERM_COLOR: always
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build:
-
+  frontend:
     runs-on: ubuntu-latest
-
+    timeout-minutes: 15
     steps:
-    - uses: actions/checkout@v4
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+      - run: pnpm test
+      - run: pnpm build
+      - run: node scripts/frontend-build-check.mjs
+      - run: pnpm eval -- --validate
+
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+        continue-on-error: true
+        id: format
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets
+        if: always()
+      - name: Formatting diagnostics
+        if: always() && runner.os == 'Linux'
+        shell: bash
+        run: |
+          cargo fmt --manifest-path src-tauri/Cargo.toml --all
+          python3 - <<'PY'
+          import json, pathlib, subprocess
+          changed = subprocess.check_output(["git", "diff", "--name-only"], text=True).splitlines()
+          if pathlib.Path("src-tauri/Cargo.lock").exists(): changed.append("src-tauri/Cargo.lock")
+          for name in changed:
+              if name.endswith(".rs") or name.endswith("Cargo.lock"):
+                  print("FORMATTED_SOURCE " + json.dumps({"path": name, "content": pathlib.Path(name).read_text()}))
+          PY
+      - name: Require formatted sources
+        if: steps.format.outcome == 'failure'
+        shell: bash
+        run: exit 1
